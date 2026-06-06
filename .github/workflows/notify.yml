@@ -1,0 +1,47 @@
+name: POG Notify
+
+on:
+  # 金曜 21:00 JST = 金曜 12:00 UTC → 出走予定
+  # 日曜 21:00 JST = 日曜 12:00 UTC → レース結果
+  schedule:
+    - cron: '0 12 * * 5'   # 金曜 21:00 JST
+    - cron: '0 12 * * 0'   # 日曜 21:00 JST
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '実行モード (schedule / results)'
+        required: true
+        default: 'schedule'
+        type: choice
+        options:
+          - schedule
+          - results
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Determine mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
+          elif [ "$(date -u +%u)" = "5" ]; then
+            echo "mode=schedule" >> $GITHUB_OUTPUT
+          else
+            echo "mode=results" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run notify
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python notify.py ${{ steps.mode.outputs.mode }}
