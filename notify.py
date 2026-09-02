@@ -85,6 +85,7 @@ def build_schedule_message(
 ) -> str:
     """今週（月〜日）の出走予定メッセージを返す。
 
+    同じレースに複数の指名馬が出走する場合は1つにまとめて表示する。
     week_cache を渡すと、今週の出走予定を horse_id ごとに書き込む。
     日曜の結果取得時に、netkeiba側の「次走情報」が既に次のレースへ
     切り替わってしまい今週末の結果を見失うケースへの備え（詳細は
@@ -94,8 +95,9 @@ def build_schedule_message(
     id_to_owners, id_to_name = _dedup_horses(horses)
     unique_ids = list(id_to_owners.keys())
 
-    lines = [f"📅 **今週の出走予定**（{format_date(this_start)}〜{format_date(this_end)}）\n"]
-    any_entry = False
+    # レースごとにまとめる（race_id → {"entry": 代表のRaceEntry, "horses": [(name, owners_str, entry), ...]}）
+    races: dict[str, dict] = {}
+    race_order: list[str] = []
 
     for i, horse_id in enumerate(unique_ids, 1):
         name = id_to_name[horse_id]
@@ -127,22 +129,40 @@ def build_schedule_message(
             ]
 
         for e in this_week:
-            any_entry = True
-            grade_tag = f" [{e.grade}]" if e.grade else ""
-            venue_race = f"{e.venue}{e.race_num}R " if e.venue and e.race_num else ""
-            if e.confirmed:
-                medal = PLACE_MEDALS.get(e.place, "")
-                place_str = f" → {e.place}着 {medal}" if e.place else " → 結果確定"
+            # race_idが取れないケース（稀）はレースをまとめず個別に表示する
+            key = e.race_id or f"__no_id_{id(e)}"
+            if key not in races:
+                races[key] = {"entry": e, "horses": []}
+                race_order.append(key)
+            races[key]["horses"].append((name, owners_str, e))
+
+    lines = [f"📅 **今週の出走予定**（{format_date(this_start)}〜{format_date(this_end)}）\n"]
+
+    if not race_order:
+        lines.append("今週の出走予定はありません。")
+        return "\n".join(lines)
+
+    race_order.sort(key=lambda k: (races[k]["entry"].race_date, races[k]["entry"].venue, races[k]["entry"].race_num or 0))
+
+    for key in race_order:
+        e = races[key]["entry"]
+        grade_tag = f" [{e.grade}]" if e.grade else ""
+        venue_race = f"{e.venue}{e.race_num}R " if e.venue and e.race_num else ""
+
+        horse_lines = []
+        for name, owners_str, he in races[key]["horses"]:
+            if he.confirmed:
+                medal = PLACE_MEDALS.get(he.place, "")
+                place_str = f" → {he.place}着 {medal}" if he.place else " → 結果確定"
             else:
                 place_str = ""
-            lines.append(
-                f"🐴 **{name}**（{owners_str}）\n"
-                f"　→ {format_date(e.race_date)} | {venue_race}{e.race_name}{grade_tag}{place_str}\n"
-                f"　🔗 <{e.race_url}>"
-            )
+            horse_lines.append(f"　🐴 **{name}**（{owners_str}）{place_str}")
 
-    if not any_entry:
-        lines.append("今週の出走予定はありません。")
+        lines.append(
+            f"🏁 {format_date(e.race_date)} | {venue_race}{e.race_name}{grade_tag}\n"
+            + "\n".join(horse_lines)
+            + f"\n　🔗 <{e.race_url}>"
+        )
 
     return "\n".join(lines)
 
