@@ -175,12 +175,19 @@ def build_results_message(horses: list[dict], verbose: bool = False) -> str:
         # 直接結果ページで確認し、見つかった分を補完する。
         found_race_ids = {e.race_id for e in weekend if e.race_id}
         for cached in week_cache.get(horse_id, []):
-            if cached["race_id"] in found_race_ids:
+            if cached.get("race_id") in found_race_ids:
                 continue
-            race_date = date.fromisoformat(cached["race_date"])
-            if not (sat <= race_date <= sun):
+            try:
+                race_date = date.fromisoformat(cached["race_date"])
+                if not (sat <= race_date <= sun):
+                    continue
+                place = netkeiba.fetch_confirmed_place(cached["race_id"], horse_id)
+            except Exception as ex:
+                # キャッシュ補完は失敗しても致命的ではないため、1件のエラーで
+                # 全体を止めずスキップする（形式不正・通信エラー等）
+                if verbose:
+                    print(f"  ↳ キャッシュ補完に失敗（スキップ）: {ex}")
                 continue
-            place = netkeiba.fetch_confirmed_place(cached["race_id"], horse_id)
             if place is None:
                 continue
             weekend.append(netkeiba.RaceEntry(

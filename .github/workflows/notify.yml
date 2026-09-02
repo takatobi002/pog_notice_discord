@@ -17,9 +17,6 @@ on:
           - schedule
           - results
 
-permissions:
-  contents: write
-
 jobs:
   notify:
     runs-on: ubuntu-latest
@@ -44,21 +41,30 @@ jobs:
             echo "mode=results" >> $GITHUB_OUTPUT
           fi
 
+      # 金曜の出走予定投稿時に生成される this_week_races.json を、日曜の結果
+      # 投稿まで引き継ぐためのキャッシュ。netkeiba側の「次走情報」が既に次の
+      # レース登録へ切り替わっていて結果が取得できないケースの補完に使う。
+      # ISO週番号をキーにすることで金曜(schedule)→日曜(results)の同じ週の
+      # 実行同士でのみ共有される。リポジトリへのpush権限は不要。
+      - name: Compute week cache key
+        id: cachekey
+        run: echo "key=race-cache-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore this week's race cache
+        uses: actions/cache/restore@v4
+        with:
+          path: this_week_races.json
+          key: ${{ steps.cachekey.outputs.key }}
+
       - name: Run notify
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python notify.py ${{ steps.mode.outputs.mode }}
 
-      # 出走予定（金曜）実行時に生成される this_week_races.json を保存しておく。
-      # 日曜の結果取得時、netkeiba側の「次走情報」が既に次のレース登録へ
-      # 切り替わっていて結果が取得できないケースの補完に使う。
-      - name: Commit this week's race cache
+      - name: Save this week's race cache
         if: steps.mode.outputs.mode == 'schedule'
-        run: |
-          if [ -n "$(git status --porcelain this_week_races.json)" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add this_week_races.json
-            git commit -m "Update this week's race cache"
-            git push
-          fi
+        continue-on-error: true  # 同じ週にschedule実行を再実行した場合、キーが既存だと失敗するため
+        uses: actions/cache/save@v4
+        with:
+          path: this_week_races.json
+          key: ${{ steps.cachekey.outputs.key }}
