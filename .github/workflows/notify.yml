@@ -17,6 +17,9 @@ on:
           - schedule
           - results
 
+permissions:
+  contents: write
+
 jobs:
   notify:
     runs-on: ubuntu-latest
@@ -45,3 +48,17 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python notify.py ${{ steps.mode.outputs.mode }}
+
+      # 出走予定（金曜）実行時に生成される this_week_races.json を保存しておく。
+      # 日曜の結果取得時、netkeiba側の「次走情報」が既に次のレース登録へ
+      # 切り替わっていて結果が取得できないケースの補完に使う。
+      - name: Commit this week's race cache
+        if: steps.mode.outputs.mode == 'schedule'
+        run: |
+          if [ -n "$(git status --porcelain this_week_races.json)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add this_week_races.json
+            git commit -m "Update this week's race cache"
+            git push
+          fi
