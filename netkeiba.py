@@ -233,6 +233,16 @@ def _fetch_place_from_result_page(race_id: str, horse_id: str) -> int | None:
 
 # ── 公開API ──────────────────────────────────────────────────────────────────
 
+def fetch_confirmed_place(race_id: str, horse_id: str) -> int | None:
+    """指定レースの結果ページから該当馬の着順を取得する。
+
+    「次走・近況情報」欄が既に次のレース登録へ切り替わってしまい、
+    戦績テーブルへの反映も間に合っていない場合の直接確認用。
+    レース結果が見つからない（未確定・出走取消等）場合は None を返す。
+    """
+    return _fetch_place_from_result_page(race_id, horse_id)
+
+
 def get_race_entries(horse_id: str) -> list[RaceEntry]:
     """馬の全レースエントリーを返す。
     戦績テーブル + 次走・近況情報を統合し、重複は除去する。

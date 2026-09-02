@@ -18,6 +18,7 @@ import discord_notify
 import netkeiba
 
 HORSES_FILE = Path(__file__).parent / "horses.json"
+WEEK_CACHE_FILE = Path(__file__).parent / "this_week_races.json"
 
 WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
 PLACE_MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
@@ -29,6 +30,20 @@ def load_horses() -> list[dict]:
         sys.exit(1)
     with open(HORSES_FILE, encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_week_cache() -> dict[str, list[dict]]:
+    """schedule実行時に保存した今週の出走予定キャッシュを読み込む。
+    存在しない場合は空辞書を返す（初回実行など）。"""
+    if not WEEK_CACHE_FILE.exists():
+        return {}
+    with open(WEEK_CACHE_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_week_cache(week_cache: dict[str, list[dict]]) -> None:
+    with open(WEEK_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(week_cache, f, ensure_ascii=False, indent=2)
 
 
 def this_week_range() -> tuple[date, date]:
@@ -65,9 +80,17 @@ def _dedup_horses(horses: list[dict]) -> tuple[dict[str, list[str]], dict[str, s
     return id_to_owners, id_to_name
 
 
-def build_schedule_message(horses: list[dict], verbose: bool = False) -> str:
+def build_schedule_message(
+    horses: list[dict], verbose: bool = False, week_cache: dict[str, list[dict]] | None = None
+) -> str:
     """今週（月〜日）の出走予定メッセージを返す。
-    同じレースに複数の指名馬が出走する場合は1つにまとめて表示する。"""
+
+    同じレースに複数の指名馬が出走する場合は1つにまとめて表示する。
+    week_cache を渡すと、今週の出走予定を horse_id ごとに書き込む。
+    日曜の結果取得時に、netkeiba側の「次走情報」が既に次のレースへ
+    切り替わってしまい今週末の結果を見失うケースへの備え（詳細は
+    build_results_message を参照）。
+    """
     this_start, this_end = this_week_range()
     id_to_owners, id_to_name = _dedup_horses(horses)
     unique_ids = list(id_to_owners.keys())
@@ -90,6 +113,20 @@ def build_schedule_message(horses: list[dict], verbose: bool = False) -> str:
 
         if verbose:
             print(f"戦績{len(entries)}件 {'今週' + str(len(this_week)) + '件' if this_week else '対象なし'}")
+
+        if week_cache is not None and this_week:
+            week_cache[horse_id] = [
+                {
+                    "race_id": e.race_id,
+                    "race_date": e.race_date.isoformat(),
+                    "race_name": e.race_name,
+                    "venue": e.venue,
+                    "race_num": e.race_num,
+                    "grade": e.grade,
+                }
+                for e in this_week
+                if e.race_id
+            ]
 
         for e in this_week:
             # race_idが取れないケース（稀）はレースをまとめず個別に表示する
@@ -135,6 +172,7 @@ def build_results_message(horses: list[dict], verbose: bool = False) -> str:
     sat, sun = this_weekend_range()
     id_to_owners, id_to_name = _dedup_horses(horses)
     unique_ids = list(id_to_owners.keys())
+    week_cache = load_week_cache()
 
     lines = [f"🏆 **今週末のレース結果**（{format_date(sat)}・{format_date(sun)}）\n"]
     any_result = False
@@ -150,6 +188,42 @@ def build_results_message(horses: list[dict], verbose: bool = False) -> str:
         entries = netkeiba.get_race_entries(horse_id)
         # 今週末の確定済み結果のみ表示
         weekend = [e for e in entries if sat <= e.race_date <= sun and e.confirmed]
+
+        # netkeiba側の「次走情報」が既に来週以降の登録へ切り替わっていると、
+        # 戦績テーブルの反映が間に合わない場合に今週末の結果が両ソースから
+        # 抜け落ちてしまう。金曜の予定投稿時に保存したキャッシュのレースIDを
+        # 直接結果ページで確認し、見つかった分を補完する。
+        found_race_ids = {e.race_id for e in weekend if e.race_id}
+        for cached in week_cache.get(horse_id, []):
+            if cached.get("race_id") in found_race_ids:
+                continue
+            try:
+                race_date = date.fromisoformat(cached["race_date"])
+                if not (sat <= race_date <= sun):
+                    continue
+                place = netkeiba.fetch_confirmed_place(cached["race_id"], horse_id)
+            except Exception as ex:
+                # キャッシュ補完は失敗しても致命的ではないため、1件のエラーで
+                # 全体を止めずスキップする（形式不正・通信エラー等）
+                if verbose:
+                    print(f"  ↳ キャッシュ補完に失敗（スキップ）: {ex}")
+                continue
+            if place is None:
+                continue
+            weekend.append(netkeiba.RaceEntry(
+                race_id=cached["race_id"],
+                race_name=cached["race_name"],
+                race_date=race_date,
+                venue=cached["venue"],
+                race_num=cached["race_num"],
+                grade=cached["grade"],
+                place=place,
+                race_url=netkeiba.RESULT_PAGE_URL.format(race_id=cached["race_id"]),
+                confirmed=True,
+            ))
+            found_race_ids.add(cached["race_id"])
+            if verbose:
+                print(f"  ↳ キャッシュ経由で結果を補完: {cached['race_name']} {place}着")
 
         if verbose:
             print(f"戦績{len(entries)}件 {'今週末結果' + str(len(weekend)) + '件' if weekend else '対象なし'}")
@@ -182,7 +256,9 @@ def main():
     print(f"{len(horses)} 頭の指名馬を読み込みました。netkeibaから情報取得中...")
 
     if args.mode == "schedule":
-        msg = build_schedule_message(horses, verbose=args.dry_run)
+        week_cache: dict[str, list[dict]] = {}
+        msg = build_schedule_message(horses, verbose=args.dry_run, week_cache=week_cache)
+        save_week_cache(week_cache)
         label = "出走予定"
     else:
         msg = build_results_message(horses, verbose=args.dry_run)
