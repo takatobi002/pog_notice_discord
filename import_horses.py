@@ -100,6 +100,11 @@ def main():
     print(f"{len(horses)} 頭の馬を登録しました → {OUTPUT_FILE}")
     for h in horses:
         print(f"  {h['owner']:12s}  {h['name']}  (ID: {h['netkeiba_id']})")
+    print(
+        "\n※ horses.json はリポジトリにコミットされません。GitHub Actionsで使うには、"
+        "このファイルの中身をリポジトリシークレット HORSES_JSON に登録し直してください "
+        "(Settings > Secrets and variables > Actions)。"
+    )
 
 
 if __name__ == "__main__":
