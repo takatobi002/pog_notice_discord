@@ -2,7 +2,11 @@
 みんなのPOGのHTMLをパースして horses.json を生成する。
 
 使い方:
-  python import_horses.py <HTMLファイルパス>
+  python import_horses.py <HTMLファイルパス> [--update-secret]
+
+  --update-secret を付けると、生成したhorses.jsonの内容で
+  GitHub Actions用のリポジトリシークレット HORSES_JSON を
+  自動更新する（要 gh CLI ログイン済み）。
 
 HTMLファイルの取得方法:
   netkeibaの「みんなのPOG」グループページをブラウザで開き、
@@ -11,6 +15,8 @@ HTMLファイルの取得方法:
 
 import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -77,13 +83,42 @@ def parse_horses(html_path: str) -> list[dict]:
     return horses
 
 
+def update_secret_via_gh() -> bool:
+    """gh CLIで、生成済みのhorses.jsonの中身をリポジトリシークレット
+    HORSES_JSON に登録する。カレントディレクトリのgitリモートから
+    対象リポジトリが自動判定される。"""
+    if shutil.which("gh") is None:
+        print(
+            "gh コマンドが見つかりません。https://cli.github.com/ からインストールし、"
+            "`gh auth login` でログインしてから再実行してください。"
+        )
+        return False
+
+    with open(OUTPUT_FILE, "rb") as f:
+        result = subprocess.run(
+            ["gh", "secret", "set", "HORSES_JSON"],
+            stdin=f,
+            capture_output=True,
+        )
+
+    if result.returncode != 0:
+        print("シークレットの更新に失敗しました:")
+        print(result.stderr.decode("utf-8", errors="replace"))
+        return False
+
+    print("リポジトリシークレット HORSES_JSON を更新しました。")
+    return True
+
+
 def main():
     if len(sys.argv) < 2:
-        print("使い方: python import_horses.py <HTMLファイルパス>")
-        print("例:     python import_horses.py minnano_pog.html")
+        print("使い方: python import_horses.py <HTMLファイルパス> [--update-secret]")
+        print("例:     python import_horses.py minnano_pog.html --update-secret")
         sys.exit(1)
 
     html_path = sys.argv[1]
+    update_secret = "--update-secret" in sys.argv[2:]
+
     if not Path(html_path).exists():
         print(f"エラー: ファイルが見つかりません: {html_path}")
         sys.exit(1)
@@ -100,6 +135,17 @@ def main():
     print(f"{len(horses)} 頭の馬を登録しました → {OUTPUT_FILE}")
     for h in horses:
         print(f"  {h['owner']:12s}  {h['name']}  (ID: {h['netkeiba_id']})")
+
+    if update_secret:
+        print()
+        update_secret_via_gh()
+    else:
+        print(
+            "\n※ horses.json はリポジトリにコミットされません。GitHub Actionsで使うには、"
+            "`python import_horses.py <HTML> --update-secret` を実行するか"
+            "(要 gh CLI)、Settings > Secrets and variables > Actions から"
+            "手動でリポジトリシークレット HORSES_JSON に登録してください。"
+        )
 
 
 if __name__ == "__main__":
