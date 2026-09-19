@@ -4,6 +4,11 @@
 使い方:
   python notify.py schedule           # 今週の出走予定を投稿（金曜夜実行想定）
   python notify.py results            # 今週の土日レース結果を投稿（日曜夜実行想定）
+  python notify.py results --skip-if-monday-race
+      # 日曜用: 出走予定キャッシュに月曜のレースがあれば投稿せず終了（月曜にまとめる）
+  python notify.py results --only-if-monday-race
+      # 月曜用: 出走予定キャッシュに月曜のレースがなければ投稿せず終了。
+      # あれば土〜月の結果をまとめて投稿（3連休などの変則開催向け）
   python notify.py schedule --dry-run # Discord投稿せずターミナルに表示
   python notify.py results  --dry-run
 """
@@ -47,16 +52,27 @@ def save_week_cache(week_cache: dict[str, list[dict]]) -> None:
 
 
 def this_week_range() -> tuple[date, date]:
+    """今週の範囲（土〜金）を返す。
+
+    3連休などで月曜に変則開催がある場合も週末とまとめて扱えるよう、
+    週の区切りを土曜始まりにしている。金曜は出走予定の投稿日なので
+    「翌土曜から始まる週」として扱う（金曜夜に実行すると翌日から1週間分）。
+    """
     today = date.today()
-    monday = today - timedelta(days=today.weekday())
-    return monday, monday + timedelta(days=6)
+    # 直近の金曜（今日が金曜なら今日）の翌日が週の始まり
+    last_friday = today - timedelta(days=(today.weekday() - 4) % 7)
+    saturday = last_friday + timedelta(days=1)
+    return saturday, saturday + timedelta(days=6)
 
 
 def this_weekend_range() -> tuple[date, date]:
-    """今週の土日（日曜夜の結果取得用）"""
+    """今週末のレース結果の対象範囲（直近の土曜〜今日）。
+
+    日曜夜に実行すれば土日、月曜の変則開催後に実行すれば土〜月が対象になる。
+    """
     today = date.today()
-    saturday = today - timedelta(days=today.weekday()) + timedelta(days=5)
-    return saturday, saturday + timedelta(days=1)
+    saturday = today - timedelta(days=(today.weekday() - 5) % 7)
+    return saturday, today
 
 
 def format_date(d: date) -> str:
@@ -83,7 +99,7 @@ def _dedup_horses(horses: list[dict]) -> tuple[dict[str, list[str]], dict[str, s
 def build_schedule_message(
     horses: list[dict], verbose: bool = False, week_cache: dict[str, list[dict]] | None = None
 ) -> str:
-    """今週（月〜日）の出走予定メッセージを返す。
+    """今週（土〜金）の出走予定メッセージを返す。
 
     同じレースに複数の指名馬が出走する場合は1つにまとめて表示する。
     week_cache を渡すと、今週の出走予定を horse_id ごとに書き込む。
@@ -167,14 +183,21 @@ def build_schedule_message(
     return "\n".join(lines)
 
 
+def has_cached_race_on(week_cache: dict[str, list[dict]], d: date) -> bool:
+    """出走予定キャッシュに指定日のレースが1件でもあるか"""
+    iso = d.isoformat()
+    return any(c.get("race_date") == iso for entries in week_cache.values() for c in entries)
+
+
 def build_results_message(horses: list[dict], verbose: bool = False) -> str:
-    """今週の土日レース結果メッセージを返す（日曜夜実行想定）"""
+    """今週末のレース結果メッセージを返す（日曜夜実行想定。月曜に実行すれば土〜月）"""
     sat, sun = this_weekend_range()
     id_to_owners, id_to_name = _dedup_horses(horses)
     unique_ids = list(id_to_owners.keys())
     week_cache = load_week_cache()
 
-    lines = [f"🏆 **今週末のレース結果**（{format_date(sat)}・{format_date(sun)}）\n"]
+    period = format_date(sat) if sat == sun else f"{format_date(sat)}〜{format_date(sun)}"
+    lines = [f"🏆 **今週末のレース結果**（{period}）\n"]
     any_result = False
 
     for i, horse_id in enumerate(unique_ids, 1):
@@ -250,7 +273,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["schedule", "results"], help="schedule: 出走予定 / results: レース結果")
     parser.add_argument("--dry-run", action="store_true", help="Discordに投稿せずターミナルに表示")
+    parser.add_argument(
+        "--skip-if-monday-race",
+        action="store_true",
+        help="results専用（日曜用）: 出走予定キャッシュに月曜のレースがあれば投稿しない（月曜にまとめて投稿する）",
+    )
+    parser.add_argument(
+        "--only-if-monday-race",
+        action="store_true",
+        help="results専用（月曜用）: 出走予定キャッシュに月曜のレースがなければ投稿しない",
+    )
     args = parser.parse_args()
+    if (args.skip_if_monday_race or args.only_if_monday_race) and args.mode != "results":
+        parser.error("--skip-if-monday-race / --only-if-monday-race は results モードでのみ使えます")
 
     horses = load_horses()
     print(f"{len(horses)} 頭の指名馬を読み込みました。netkeibaから情報取得中...")
@@ -261,6 +296,18 @@ def main():
         save_week_cache(week_cache)
         label = "出走予定"
     else:
+        if args.skip_if_monday_race or args.only_if_monday_race:
+            sat, _ = this_weekend_range()
+            monday = sat + timedelta(days=2)
+            monday_race = has_cached_race_on(load_week_cache(), monday)
+            # キャッシュがない（restore失敗など）場合は monday_race=False となり、
+            # 日曜は通常通り投稿・月曜はスキップ、という通常週と同じ挙動に倒れる
+            if args.skip_if_monday_race and monday_race:
+                print(f"{format_date(monday)} に出走予定があるため、今回は投稿せず月曜にまとめて投稿します。")
+                return
+            if args.only_if_monday_race and not monday_race:
+                print(f"{format_date(monday)} の出走予定はキャッシュにないため、投稿をスキップします。")
+                return
         msg = build_results_message(horses, verbose=args.dry_run)
         label = "レース結果"
 
