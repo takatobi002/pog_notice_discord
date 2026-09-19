@@ -2,20 +2,25 @@ name: POG Notify
 
 on:
   # 金曜 21:00 JST = 金曜 12:00 UTC → 出走予定
-  # 日曜 21:00 JST = 日曜 12:00 UTC → レース結果
+  # 日曜 21:00 JST = 日曜 12:00 UTC → レース結果（月曜開催がある週はスキップ）
+  # 月曜 21:00 JST = 月曜 12:00 UTC → 変則開催（3連休など）がある週だけ土〜月の結果。
+  #   どちらも金曜の出走予定キャッシュに月曜のレースがあるかで判定する
   schedule:
     - cron: '0 12 * * 5'   # 金曜 21:00 JST
     - cron: '0 12 * * 0'   # 日曜 21:00 JST
+    - cron: '0 12 * * 1'   # 月曜 21:00 JST
   workflow_dispatch:
     inputs:
       mode:
-        description: '実行モード (schedule / results)'
+        description: '実行モード'
         required: true
         default: 'schedule'
         type: choice
         options:
           - schedule
           - results
+          - results --skip-if-monday-race
+          - results --only-if-monday-race
 
 jobs:
   notify:
@@ -47,18 +52,21 @@ jobs:
             echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
           elif [ "$(date -u +%u)" = "5" ]; then
             echo "mode=schedule" >> $GITHUB_OUTPUT
+          elif [ "$(date -u +%u)" = "1" ]; then
+            echo "mode=results --only-if-monday-race" >> $GITHUB_OUTPUT
           else
-            echo "mode=results" >> $GITHUB_OUTPUT
+            echo "mode=results --skip-if-monday-race" >> $GITHUB_OUTPUT
           fi
 
       # 金曜の出走予定投稿時に生成される this_week_races.json を、日曜の結果
       # 投稿まで引き継ぐためのキャッシュ。netkeiba側の「次走情報」が既に次の
       # レース登録へ切り替わっていて結果が取得できないケースの補完に使う。
-      # ISO週番号をキーにすることで金曜(schedule)→日曜(results)の同じ週の
-      # 実行同士でのみ共有される。リポジトリへのpush権限は不要。
+      # notify.py の週の定義（土〜金、金曜は翌週扱い）に合わせ、金曜(schedule)〜
+      # 翌木曜の実行同士でのみ共有される。ISO週は月曜始まりなので、3日ずらすと
+      # 金〜木がちょうど同じISO週に収まる。リポジトリへのpush権限は不要。
       - name: Compute week cache key
         id: cachekey
-        run: echo "key=race-cache-$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+        run: echo "key=race-cache-$(date -u -d '+3 days' +%G-%V)" >> "$GITHUB_OUTPUT"
 
       - name: Restore this week's race cache
         uses: actions/cache/restore@v4
