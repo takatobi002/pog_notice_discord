@@ -1,0 +1,47 @@
+name: Check POG results for November 14–15
+on:
+  push:
+    branches: [check/pog-results-2026-11-15]
+    paths: [.github/workflows/check-pog-2026-11-15.yml]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - uses: actions/cache/restore@v4
+        with:
+          path: this_week_races.json
+          key: race-cache-2026-47
+      - name: Check results without posting
+        env:
+          HORSES_JSON: ${{ secrets.HORSES_JSON }}
+        run: |
+          python - <<'PY'
+          import contextlib
+          import io
+          import json
+          import os
+          from datetime import date
+          from pathlib import Path
+          from collections import Counter
+          import netkeiba
+          import notify
+          try:
+              horses = json.loads(os.environ["HORSES_JSON"])
+              assert horses
+              with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                  message = notify.build_results_message(horses, target_date=date(2026, 11, 15))
+          except Exception as error:
+              raise SystemExit(f"Result check failed: {type(error).__name__}") from None
+          print("Target period: 2026-11-14 to 2026-11-15")
+          print(f"Race cache present: {Path('this_week_races.json').is_file()}")
+          print(f"Result entries: {message.count(netkeiba.RESULT_PAGE_URL.split('{')[0])}")
+          print("Discord posting was disabled.")
+          PY
