@@ -51,26 +51,26 @@ def save_week_cache(week_cache: dict[str, list[dict]]) -> None:
         json.dump(week_cache, f, ensure_ascii=False, indent=2)
 
 
-def this_week_range() -> tuple[date, date]:
+def this_week_range(today: date | None = None) -> tuple[date, date]:
     """今週の範囲（土〜金）を返す。
 
     3連休などで月曜に変則開催がある場合も週末とまとめて扱えるよう、
     週の区切りを土曜始まりにしている。金曜は出走予定の投稿日なので
     「翌土曜から始まる週」として扱う（金曜夜に実行すると翌日から1週間分）。
     """
-    today = date.today()
+    today = today or date.today()
     # 直近の金曜（今日が金曜なら今日）の翌日が週の始まり
     last_friday = today - timedelta(days=(today.weekday() - 4) % 7)
     saturday = last_friday + timedelta(days=1)
     return saturday, saturday + timedelta(days=6)
 
 
-def this_weekend_range() -> tuple[date, date]:
+def this_weekend_range(today: date | None = None) -> tuple[date, date]:
     """今週末のレース結果の対象範囲（直近の土曜〜今日）。
 
     日曜夜に実行すれば土日、月曜の変則開催後に実行すれば土〜月が対象になる。
     """
-    today = date.today()
+    today = today or date.today()
     saturday = today - timedelta(days=(today.weekday() - 5) % 7)
     return saturday, today
 
@@ -97,7 +97,8 @@ def _dedup_horses(horses: list[dict]) -> tuple[dict[str, list[str]], dict[str, s
 
 
 def build_schedule_message(
-    horses: list[dict], verbose: bool = False, week_cache: dict[str, list[dict]] | None = None
+    horses: list[dict], verbose: bool = False, week_cache: dict[str, list[dict]] | None = None,
+    target_date: date | None = None,
 ) -> str:
     """今週（土〜金）の出走予定メッセージを返す。
 
@@ -107,7 +108,7 @@ def build_schedule_message(
     切り替わってしまい今週末の結果を見失うケースへの備え（詳細は
     build_results_message を参照）。
     """
-    this_start, this_end = this_week_range()
+    this_start, this_end = this_week_range(target_date)
     id_to_owners, id_to_name = _dedup_horses(horses)
     unique_ids = list(id_to_owners.keys())
 
@@ -189,9 +190,11 @@ def has_cached_race_on(week_cache: dict[str, list[dict]], d: date) -> bool:
     return any(c.get("race_date") == iso for entries in week_cache.values() for c in entries)
 
 
-def build_results_message(horses: list[dict], verbose: bool = False) -> str:
+def build_results_message(
+    horses: list[dict], verbose: bool = False, target_date: date | None = None
+) -> str:
     """今週末のレース結果メッセージを返す（日曜夜実行想定。月曜に実行すれば土〜月）"""
-    sat, sun = this_weekend_range()
+    sat, sun = this_weekend_range(target_date)
     id_to_owners, id_to_name = _dedup_horses(horses)
     unique_ids = list(id_to_owners.keys())
     week_cache = load_week_cache()
@@ -283,6 +286,8 @@ def main():
         action="store_true",
         help="results専用（月曜用）: 出走予定キャッシュに月曜のレースがなければ投稿しない",
     )
+    parser.add_argument("--target-date", type=date.fromisoformat)
+    parser.add_argument("--check-only", action="store_true", help="投稿内容をログに出さず取得を確認")
     args = parser.parse_args()
     if (args.skip_if_monday_race or args.only_if_monday_race) and args.mode != "results":
         parser.error("--skip-if-monday-race / --only-if-monday-race は results モードでのみ使えます")
@@ -292,12 +297,12 @@ def main():
 
     if args.mode == "schedule":
         week_cache: dict[str, list[dict]] = {}
-        msg = build_schedule_message(horses, verbose=args.dry_run, week_cache=week_cache)
+        msg = build_schedule_message(horses, verbose=args.dry_run, week_cache=week_cache, target_date=args.target_date)
         save_week_cache(week_cache)
         label = "出走予定"
     else:
         if args.skip_if_monday_race or args.only_if_monday_race:
-            sat, _ = this_weekend_range()
+            sat, _ = this_weekend_range(args.target_date)
             monday = sat + timedelta(days=2)
             monday_race = has_cached_race_on(load_week_cache(), monday)
             # キャッシュがない（restore失敗など）場合は monday_race=False となり、
@@ -308,10 +313,12 @@ def main():
             if args.only_if_monday_race and not monday_race:
                 print(f"{format_date(monday)} の出走予定はキャッシュにないため、投稿をスキップします。")
                 return
-        msg = build_results_message(horses, verbose=args.dry_run)
+        msg = build_results_message(horses, verbose=args.dry_run, target_date=args.target_date)
         label = "レース結果"
 
-    if args.dry_run:
+    if args.check_only:
+        print(f"{label}の取得を確認しました。")
+    elif args.dry_run:
         print(f"\n--- {label} ---")
         print(msg)
     else:
