@@ -80,7 +80,15 @@ class RaceEntry:
 
 def _get(url: str, params: dict | None = None) -> requests.Response:
     time.sleep(1)
-    resp = requests.get(url, headers=HEADERS_PC, params=params, timeout=15)
+    for delay in (1, 3):
+        try:
+            resp = requests.get(url, headers=HEADERS_PC, params=params, timeout=15)
+        except (requests.Timeout, requests.ConnectionError):
+            time.sleep(delay)
+        else:
+            break
+    else:
+        resp = requests.get(url, headers=HEADERS_PC, params=params, timeout=15)
     resp.raise_for_status()
     return resp
 
