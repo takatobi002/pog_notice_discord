@@ -1,14 +1,14 @@
 name: POG Notify
 
 on:
-  # 金曜 21:00 JST = 金曜 12:00 UTC → 出走予定
-  # 日曜 21:00 JST = 日曜 12:00 UTC → レース結果（月曜開催がある週はスキップ）
-  # 月曜 21:00 JST = 月曜 12:00 UTC → 変則開催（3連休など）がある週だけ土〜月の結果。
+  # 金曜 21:17 JST = 金曜 12:17 UTC → 出走予定
+  # 日曜 21:17 JST = 日曜 12:17 UTC → レース結果（月曜開催がある週はスキップ）
+  # 月曜 21:17 JST = 月曜 12:17 UTC → 変則開催（3連休など）がある週だけ土〜月の結果。
   #   どちらも金曜の出走予定キャッシュに月曜のレースがあるかで判定する
   schedule:
-    - cron: '0 12 * * 5'   # 金曜 21:00 JST
-    - cron: '0 12 * * 0'   # 日曜 21:00 JST
-    - cron: '0 12 * * 1'   # 月曜 21:00 JST
+    - cron: '17 12 * * 5'   # 金曜 21:17 JST
+    - cron: '17 12 * * 0'   # 日曜 21:17 JST
+    - cron: '17 12 * * 1'   # 月曜 21:17 JST
   workflow_dispatch:
     inputs:
       mode:
@@ -21,6 +21,14 @@ on:
           - results
           - results --skip-if-monday-race
           - results --only-if-monday-race
+
+      target_date:
+        description: '対象日 (YYYY-MM-DD)。空欄なら日本時間の今日'
+        type: string
+      check_only:
+        description: '取得を確認する（Discordに投稿しない）'
+        type: boolean
+        default: true
 
 jobs:
   notify:
@@ -45,42 +53,56 @@ jobs:
           fi
           printf '%s' "$HORSES_JSON" > horses.json
 
-      - name: Determine mode
+      - name: Determine notification date and mode
         id: mode
+        env:
+          TRIGGER_CRON: ${{ github.event.schedule }}
+          INPUT_MODE: ${{ inputs.mode }}
+          INPUT_DATE: ${{ inputs.target_date }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
-          elif [ "$(date -u +%u)" = "5" ]; then
-            echo "mode=schedule" >> $GITHUB_OUTPUT
-          elif [ "$(date -u +%u)" = "1" ]; then
-            echo "mode=results --only-if-monday-race" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          today=$(TZ=Asia/Tokyo date +%F)
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            mode=$INPUT_MODE
+            target=${INPUT_DATE:-$today}
+            [[ "$target" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
+            [[ "$(date -u -d "$target" +%F)" == "$target" ]]
           else
-            echo "mode=results --skip-if-monday-race" >> $GITHUB_OUTPUT
+            case "$TRIGGER_CRON" in
+              '17 12 * * 5') mode=schedule; weekday=5 ;;
+              '17 12 * * 0') mode='results --skip-if-monday-race'; weekday=7 ;;
+              '17 12 * * 1') mode='results --only-if-monday-race'; weekday=1 ;;
+              *) exit 1 ;;
+            esac
+            days=$(( ($(date -u -d "$today" +%u) - weekday + 7) % 7 ))
+            target=$(date -u -d "$today $days days ago" +%F)
           fi
-
-      # 金曜の出走予定投稿時に生成される this_week_races.json を、日曜の結果
-      # 投稿まで引き継ぐためのキャッシュ。netkeiba側の「次走情報」が既に次の
-      # レース登録へ切り替わっていて結果が取得できないケースの補完に使う。
-      # notify.py の週の定義（土〜金、金曜は翌週扱い）に合わせ、金曜(schedule)〜
-      # 翌木曜の実行同士でのみ共有される。ISO週は月曜始まりなので、3日ずらすと
-      # 金〜木がちょうど同じISO週に収まる。リポジトリへのpush権限は不要。
-      - name: Compute week cache key
-        id: cachekey
-        run: echo "key=race-cache-$(date -u -d '+3 days' +%G-%V)" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "key=race-cache-$(date -u -d "$target +3 days" +%G-%V)" >> "$GITHUB_OUTPUT"
+          echo "Target date: $target"
 
       - name: Restore this week's race cache
         uses: actions/cache/restore@v4
         with:
           path: this_week_races.json
-          key: ${{ steps.cachekey.outputs.key }}
+          key: ${{ steps.mode.outputs.key }}
 
       - name: Run notify
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python notify.py ${{ steps.mode.outputs.mode }}
+          NOTIFY_MODE: ${{ steps.mode.outputs.mode }}
+          TARGET_DATE: ${{ steps.mode.outputs.target }}
+          CHECK_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.check_only }}
+        run: |
+          read -r -a args <<< "$NOTIFY_MODE"
+          if [[ "$CHECK_ONLY" == true ]]; then
+            args+=(--check-only)
+          fi
+          python notify.py "${args[@]}" --target-date "$TARGET_DATE"
 
       - name: Save this week's race cache
-        if: steps.mode.outputs.mode == 'schedule'
+        if: steps.mode.outputs.mode == 'schedule' && (github.event_name != 'workflow_dispatch' || !inputs.check_only)
         continue-on-error: true  # 同じ週にschedule実行を再実行した場合、キーが既存だと失敗するため
         uses: actions/cache/save@v4
         with:
