@@ -1,4 +1,4 @@
-name: Check POG results for November 14–15
+name: Resend POG results for November 14–15
 on:
   push:
     branches: [check/pog-results-2026-11-15]
@@ -7,6 +7,7 @@ permissions:
   contents: read
 jobs:
   check:
+    if: github.run_attempt == 1 && github.event.before == '635abf868b85192925122d3005c42b84c15a3d27'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -19,8 +20,9 @@ jobs:
         with:
           path: this_week_races.json
           key: race-cache-2026-47
-      - name: Check results without posting
+      - name: Resend verified results to Discord
         env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           HORSES_JSON: ${{ secrets.HORSES_JSON }}
         run: |
           python - <<'PY'
@@ -30,7 +32,7 @@ jobs:
           import os
           from datetime import date
           from pathlib import Path
-          from collections import Counter
+          import discord_notify
           import netkeiba
           import notify
           try:
@@ -43,5 +45,13 @@ jobs:
           print("Target period: 2026-11-14 to 2026-11-15")
           print(f"Race cache present: {Path('this_week_races.json').is_file()}")
           print(f"Result entries: {message.count(netkeiba.RESULT_PAGE_URL.split('{')[0])}")
-          print("Discord posting was disabled.")
+          if not Path("this_week_races.json").is_file():
+              raise SystemExit("Posting stopped: race cache missing.")
+          if message.count(netkeiba.RESULT_PAGE_URL.split("{")[0]) != 5:
+              raise SystemExit("Posting stopped: expected 5 result entries.")
+          try:
+              discord_notify.post("📌 11/14〜15分の再送\n\n" + message)
+          except Exception as error:
+              raise SystemExit(f"Discord result uncertain or failed: {type(error).__name__}") from None
+          print("Discord accepted the resend.")
           PY
